@@ -121,6 +121,27 @@ void schedule(int channel)
             }
         }
 
+        // if no write row hit, check read queue
+        LL_FOREACH(read_queue_head[channel], rd_ptr)
+        {
+            // if COL_WRITE_CMD is the next command, then that means the appropriate row must already be open && batch first
+            if(rd_ptr->command_issuable && (rd_ptr->next_command == COL_READ_CMD) && rd_ptr->user_ptr )
+            {
+                issue_request_command(rd_ptr);
+                return;
+            }
+        }
+
+        LL_FOREACH(read_queue_head[channel], rd_ptr)
+        {
+            // if COL_WRITE_CMD is the next command, then that means the appropriate row must already be open
+            if(rd_ptr->command_issuable && (rd_ptr->next_command == COL_READ_CMD))
+            {
+                issue_request_command(rd_ptr);
+                return;
+            }
+        }
+
         // if no open rows, just issue any other available commands
         LL_FOREACH(write_queue_head[channel], wr_ptr)
         {
