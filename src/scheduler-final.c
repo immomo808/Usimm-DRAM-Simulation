@@ -44,25 +44,25 @@ void init_scheduler_vars()
 // 4.FCFS
 // and if REQ_B = NULL then return REQ_A
 int higher(request_t *req_a, request_t *req_b){
-	if( req_b == NULL ) return 1;                                                       // req_b = NULL -> always return req_a
+    if( req_b == NULL ) return 1;                                                       // req_b = NULL -> always return req_a
     if ((req_a->user_ptr) && !(req_b->user_ptr)) return 1;                              // if req_a marked and req_b didn't then return req_a
-	int req_a_hit = req_a->command_issuable && (req_a->next_command == COL_READ_CMD), 
+    int req_a_hit = req_a->command_issuable && (req_a->next_command == COL_READ_CMD), 
         req_b_hit = req_b->command_issuable && (req_b->next_command == COL_READ_CMD);   // row hit status
-	int req_a_core  = req_a->thread_id, 
+    int req_a_core  = req_a->thread_id, 
         req_b_core  = req_b->thread_id;                                                 // core of each req
-	if (!(req_a->user_ptr)){
-		if (req_b->user_ptr) return 0;                                              
+    if (!(req_a->user_ptr)){
+        if (req_b->user_ptr) return 0;                                              
         else 
             if (req_b_hit)      return 0;                                               // hit   
-		    else if (req_a_hit) return 1;
-		    else                return 0;
+            else if (req_a_hit) return 1;
+            else                return 0;
     }
-	if (req_a_hit && !req_b_hit) return 1;
-	if (!req_a_hit && req_b_hit) return 0;
-	if (load_max[req_a_core] < load_max[req_b_core]) return 1;                          // all and max load ranking
-	else if (load_max[req_a_core] > load_max[req_b_core]) return 0;
+    if (req_a_hit && !req_b_hit) return 1;
+    if (!req_a_hit && req_b_hit) return 0;
+    if (load_max[req_a_core] < load_max[req_b_core]) return 1;                          // all and max load ranking
+    else if (load_max[req_a_core] > load_max[req_b_core]) return 0;
     else if (load_all[req_a_core] < load_all[req_b_core]) return 1;
-	return 0;
+    return 0;
 }
 
 
@@ -71,6 +71,8 @@ void schedule(int channel)
 
     request_t * rd_ptr = NULL;
     request_t * wr_ptr = NULL;
+    int read_issued = 0;
+    int write_issued = 0;
 
     // begin write drain if we're above the high water mark
     if((write_queue_length[channel] > HI_WM) && (!drain_writes[channel]))
@@ -117,96 +119,165 @@ void schedule(int channel)
             {
                 writes_done_this_drain[channel]++;
                 issue_request_command(wr_ptr);
-                return;
+                write_issued = 1;
+                break;
             }
         }
-
-        // if no write row hit, check read queue
-        LL_FOREACH(read_queue_head[channel], rd_ptr)
-        {
-            // if COL_WRITE_CMD is the next command, then that means the appropriate row must already be open && batch first
-            if(rd_ptr->command_issuable && (rd_ptr->next_command == COL_READ_CMD) && rd_ptr->user_ptr )
+        if(!write_issued){
+            // if no write row hit, check read queue
+            LL_FOREACH(read_queue_head[channel], rd_ptr)
             {
-                issue_request_command(rd_ptr);
-                return;
-            }
-        }
-
-        LL_FOREACH(read_queue_head[channel], rd_ptr)
-        {
-            // if COL_WRITE_CMD is the next command, then that means the appropriate row must already be open
-            if(rd_ptr->command_issuable && (rd_ptr->next_command == COL_READ_CMD))
-            {
-                issue_request_command(rd_ptr);
-                return;
-            }
-        }
-
-        // if no open rows, just issue any other available commands
-        LL_FOREACH(write_queue_head[channel], wr_ptr)
-        {
-            if(wr_ptr->command_issuable)
-            {
-                issue_request_command(wr_ptr);
-                return;
-            }
-        }
-
-        // nothing issuable this cycle
-        return;
-    }
-
-    // do a read
-    // Start PAR-BS
-    if( marked_num == 0 ){          // if last batch finish
-        init_all_banks();
-        for(int ch = 0; ch < MAX_NUM_CHANNELS; ch++){
-            LL_FOREACH(read_queue_head[ch], rd_ptr){
-                int index = 
-                    rd_ptr->thread_id * MAX_NUM_CHANNELS * MAX_NUM_RANKS * MAX_NUM_BANKS + 
-                    ch * MAX_NUM_RANKS * MAX_NUM_BANKS +
-                    (rd_ptr->dram_addr).rank * MAX_NUM_BANKS + 
-                    (rd_ptr->dram_addr).bank; 
-                if ( load_bank[index] < MARKINGCAP ){                   // Mark the Req if load <  MARKINGCAP (Rule 1)
-                    load_bank[index]++;
-                    marked_num++;
-                    rd_ptr->user_ptr = ((int*)malloc(sizeof(int)));
-                    *((int*)rd_ptr->user_ptr) = 1;
+                // if COL_WRITE_CMD is the next command, then that means the appropriate row must already be open && batch first
+                if(rd_ptr->command_issuable && (rd_ptr->next_command == COL_READ_CMD) && rd_ptr->user_ptr )
+                {
+                    issue_request_command(rd_ptr);
+                    return;
                 }
             }
         }
-        int max_load = 0, all_load = 0;
-        for(int coreid = 0; coreid < NUMCORES; coreid++){               // Compute all & max loading in each core
-            for(int i = coreid * MAX_NUM_CHANNELS * MAX_NUM_RANKS * MAX_NUM_BANKS; 
-                    i < (coreid + 1) * MAX_NUM_CHANNELS * MAX_NUM_RANKS * MAX_NUM_BANKS;
-                    i++ ){
-                all_load += load_bank[i];
-                if ( max_load < load_bank[i] )
-                    max_load = load_bank[i];
+
+        if(!write_issued && !read_issued){
+            LL_FOREACH(read_queue_head[channel], rd_ptr)
+            {
+                // if COL_WRITE_CMD is the next command, then that means the appropriate row must already be open
+                if(rd_ptr->command_issuable && (rd_ptr->next_command == COL_READ_CMD))
+                {
+                    issue_request_command(rd_ptr);
+                    return;
+                }
             }
-            load_max[coreid] = max_load;
-            load_all[coreid] = all_load;
-            max_load = 0;
-            all_load = 0;
+        }
+        if(!write_issued && !read_issued){
+            // if no open rows, just issue any other available commands
+            LL_FOREACH(write_queue_head[channel], wr_ptr)
+            {
+                if(wr_ptr->command_issuable)
+                {
+                    issue_request_command(wr_ptr);
+                    return;
+                }
+            }
+        }
+        // try auto-precharge
+        if (!write_issued && !read_issued) {
+            return; // no request issued, quit
+        }
+
+        if (!write_issued && read_issued) {
+            wr_ptr = rd_ptr;
+        }
+
+        if (cas_issued_current_cycle[channel][wr_ptr->dram_addr.rank][wr_ptr->dram_addr.bank]) {
+            //if (!write_issued && read_issued) {
+            //	wr_ptr = rd_ptr;
+            //}
+            LL_FOREACH(write_queue_head[channel], auto_ptr) {
+                if (!auto_ptr->request_served
+                        && auto_ptr->dram_addr.rank == wr_ptr->dram_addr.rank
+                        && auto_ptr->dram_addr.bank == wr_ptr->dram_addr.bank
+                        && auto_ptr->dram_addr.row == wr_ptr->dram_addr.row) {
+                    return; // has hit, no auto precharge
+                }
+            }
+            LL_FOREACH(read_queue_head[channel], auto_ptr) {
+                if (!auto_ptr->request_served
+                        && auto_ptr->dram_addr.rank == wr_ptr->dram_addr.rank
+                        && auto_ptr->dram_addr.bank == wr_ptr->dram_addr.bank
+                        && auto_ptr->dram_addr.row == wr_ptr->dram_addr.row) {
+                    return; // has hit, no auto precharge
+                }
+            }
+            issue_autoprecharge(channel, wr_ptr->dram_addr.rank, wr_ptr->dram_addr.bank);
+            // nothing issuable this cycle
+            return;
+        }
+
+        // do a read
+        // Start PAR-BS
+        if( marked_num == 0 ){          // if last batch finish
+            init_all_banks();
+            for(int ch = 0; ch < MAX_NUM_CHANNELS; ch++){
+                LL_FOREACH(read_queue_head[ch], rd_ptr){
+                    int index = 
+                        rd_ptr->thread_id * MAX_NUM_CHANNELS * MAX_NUM_RANKS * MAX_NUM_BANKS + 
+                        ch * MAX_NUM_RANKS * MAX_NUM_BANKS +
+                        (rd_ptr->dram_addr).rank * MAX_NUM_BANKS + 
+                        (rd_ptr->dram_addr).bank; 
+                    if ( load_bank[index] < MARKINGCAP ){                   // Mark the Req if load <  MARKINGCAP (Rule 1)
+                        load_bank[index]++;
+                        marked_num++;
+                        rd_ptr->user_ptr = ((int*)malloc(sizeof(int)));
+                        *((int*)rd_ptr->user_ptr) = 1;
+                    }
+                }
+            }
+            int max_load = 0, all_load = 0;
+            for(int coreid = 0; coreid < NUMCORES; coreid++){               // Compute all & max loading in each core
+                for(int i = coreid * MAX_NUM_CHANNELS * MAX_NUM_RANKS * MAX_NUM_BANKS; 
+                        i < (coreid + 1) * MAX_NUM_CHANNELS * MAX_NUM_RANKS * MAX_NUM_BANKS;
+                        i++ ){
+                    all_load += load_bank[i];
+                    if ( max_load < load_bank[i] )
+                        max_load = load_bank[i];
+                }
+                load_max[coreid] = max_load;
+                load_all[coreid] = all_load;
+                max_load = 0;
+                all_load = 0;
+            }
+        }
+
+        request_t *issue = NULL;
+        LL_FOREACH(read_queue_head[channel],rd_ptr) {                       // Start batch
+            if(rd_ptr->command_issuable)
+                if(higher(rd_ptr,issue))
+                    issue = rd_ptr;
+        }
+        if(issue){                                                          // Start issue
+            issue_request_command(issue);
+            read_issued = 1;
+            if ((issue->user_ptr) && issue->next_command == COL_READ_CMD)
+                marked_num--;
+        }
+
+        // try auto-precharge
+        if (!write_issued && !read_issued) {
+            return; // no request issued, quit
+        }
+
+        if (write_issued && !read_issued) {
+            rd_ptr = wr_ptr;
+        }
+
+
+        if (cas_issued_current_cycle[channel][rd_ptr->dram_addr.rank][rd_ptr->dram_addr.bank]) {
+            //if (!read_issued && write_issued) {
+            //	rd_ptr = wr_ptr;
+            //}
+            LL_FOREACH(read_queue_head[channel], auto_ptr) {
+                if (!auto_ptr->request_served
+                        && auto_ptr->dram_addr.rank == rd_ptr->dram_addr.rank
+                        && auto_ptr->dram_addr.bank == rd_ptr->dram_addr.bank
+                        && auto_ptr->dram_addr.row == rd_ptr->dram_addr.row) {
+                    return; // has hit, no auto precharge
+                }
+            }
+            LL_FOREACH(write_queue_head[channel], auto_ptr) {
+                if (!auto_ptr->request_served
+                        && auto_ptr->dram_addr.rank == rd_ptr->dram_addr.rank
+                        && auto_ptr->dram_addr.bank == rd_ptr->dram_addr.bank
+                        && auto_ptr->dram_addr.row == rd_ptr->dram_addr.row) {
+                    return; // has hit, no auto precharge
+                }
+            }
+            // no hit pending, auto precharge
+            issue_autoprecharge(channel, rd_ptr->dram_addr.rank, rd_ptr->dram_addr.bank)
+                return;
+
         }
     }
-
-    request_t *issue = NULL;
-    LL_FOREACH(read_queue_head[channel],rd_ptr) {                       // Start batch
-        if(rd_ptr->command_issuable)
-            if(higher(rd_ptr,issue))
-                issue = rd_ptr;
+    void scheduler_stats()
+    {
+        /* Nothing to print for now. */
     }
-    if(issue){                                                          // Start issue
-        issue_request_command(issue);
-        if ((issue->user_ptr) && issue->next_command == COL_READ_CMD)
-            marked_num--;
-    }
-
-}
-
-void scheduler_stats()
-{
-    /* Nothing to print for now. */
-}
 
