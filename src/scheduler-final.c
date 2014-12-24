@@ -16,6 +16,11 @@ int draining_writes_due_to_rq_empty[MAX_NUM_CHANNELS];
 
 int *load_bank, *load_max, *load_all, marked_num;
 
+// Traffic light
+int *traffic_light;
+int *requests_per_channel;
+int *requests_per_rank;
+
 // Cleaning the loading
 void init_all_banks(){
 	int bank_count = NUMCORES * MAX_NUM_CHANNELS * MAX_NUM_RANKS * MAX_NUM_BANKS;
@@ -31,6 +36,9 @@ void init_scheduler_vars()
 	load_bank = (int*)malloc( bank_count * sizeof(int) ); 
 	load_max = (int*)malloc( NUMCORES * sizeof(int));
 	load_all = (int*)malloc( NUMCORES * sizeof(int));
+	traffic_light = (int*)malloc( NUMCORES * sizeof(int));
+	requests_per_channel = (int*)malloc( NUMCORES * MAX_NUM_CHANNELS * sizeof(int));
+	requests_per_rank = (int*)malloc( NUMCORES * MAX_NUM_CHANNELS * MAX_NUM_BANKS * sizeof(int));
 	init_all_banks();
 	marked_num = 0;
 	return;
@@ -50,6 +58,8 @@ int higher(request_t *req_a, request_t *req_b){
 		req_b_hit = req_b->command_issuable && (req_b->next_command == COL_READ_CMD);   // row hit status
 	int req_a_core  = req_a->thread_id, 
 		req_b_core  = req_b->thread_id;                                                 // core of each req
+	int light_a  = traffic_light[req_a->thread_id], 
+		light_b  = traffic_light[req_b->thread_id];                                                 // light of each req
 	if (!(req_a->user_ptr)){
 		if (req_b->user_ptr) return 0;                                              
 		else 
@@ -59,6 +69,8 @@ int higher(request_t *req_a, request_t *req_b){
 	}
 	if (req_a_hit && !req_b_hit) return 1;
 	if (!req_a_hit && req_b_hit) return 0;
+	if (!light_a && light_b) return 1;
+	if (light_a && !light_b) return 0;
 	if (load_max[req_a_core] < load_max[req_b_core]) return 1;                          // all and max load ranking
 	else if (load_max[req_a_core] > load_max[req_b_core]) return 0;
 	else if (load_all[req_a_core] < load_all[req_b_core]) return 1;
@@ -232,6 +244,52 @@ void schedule(int channel)
 		}
 	}
 
+	// TODO: Traffic light
+	// Iterate through all the ranks and channels to know the request number of each thread toward ranks and channels
+	// Reset first
+	for (int ch = 0; ch < NUMCORES * MAX_NUM_CHANNELS; ch++) {
+		requests_per_channel[ch] = 0;
+	}
+	for (int rk = 0; rk < NUMCORES * MAX_NUM_CHANNELS * MAX_NUM_RANKS; rk++) {
+		requests_per_rank[rk] = 0;
+	}
+	for (int coreid; coreid < NUMCORES; coreid++) {
+		traffic_light = 0;
+	}
+	// Compute
+	for(int ch = 0; ch < MAX_NUM_CHANNELS; ch++){
+		LL_FOREACH(read_queue_head[ch], rd_ptr){
+			int channel_index =
+				rd_ptr->thread_id * MAX_NUM_CHANNELS + ch;
+			int rank_index = 
+				rd_ptr->thread_id * MAX_NUM_CHANNELS * MAX_NUM_RANKS + 
+				ch * MAX_NUM_RANKS + (rd_ptr->dram_addr).rank; 
+			requests_per_rank[rank_index]++;
+			requests_per_channel[channel_index]++;
+		}
+	}
+	// Turn on the light
+	for(int ch = 0; ch < MAX_NUM_CHANNELS; ch++){
+		if (drain_writes[ch]) {
+			for (int coreid = 0; coreid < NUMCORES; coreid++) {
+				if (requests_per_channel[coreid * MAX_NUM_CHANNELS + ch] > 0) {
+					traffic_light[coreid] = 1;
+				}
+			}	
+		}
+		for (int rk; rk < MAX_NUM_RANKS; rk++) {
+			if (forced_refresh_mode_on[ch][rk]) {
+				for (int coreid = 0; coreid < NUMCORES; coreid++) {
+					if (requests_per_rank[coreid * MAX_NUM_CHANNELS * MAX_NUM_RANKS + ch * MAX_NUM_RANKS + rk] > 0) {
+						traffic_light[coreid] = 1;
+					}
+				}	
+			}
+		}
+	}
+	
+
+
 	request_t *issue = NULL;
 	LL_FOREACH(read_queue_head[channel],rd_ptr) {                       // Start batch
 		if(rd_ptr->command_issuable)
@@ -277,7 +335,7 @@ void schedule(int channel)
 		}
 		// no hit pending, auto precharge
 		issue_autoprecharge(channel, rd_ptr->dram_addr.rank, rd_ptr->dram_addr.bank);
-			return;
+		return;
 
 	}
 }
