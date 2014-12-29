@@ -253,8 +253,8 @@ void schedule(int channel)
 	for (int rk = 0; rk < NUMCORES * MAX_NUM_CHANNELS * MAX_NUM_RANKS; rk++) {
 		requests_per_rank[rk] = 0;
 	}
-	for (int coreid; coreid < NUMCORES; coreid++) {
-		traffic_light = 0;
+	for (int coreid = 0; coreid < NUMCORES; coreid++) {
+		traffic_light[coreid] = 0;
 	}
 	// Compute
 	for(int ch = 0; ch < MAX_NUM_CHANNELS; ch++){
@@ -277,7 +277,7 @@ void schedule(int channel)
 				}
 			}	
 		}
-		for (int rk; rk < MAX_NUM_RANKS; rk++) {
+		for (int rk = 0; rk < MAX_NUM_RANKS; rk++) {
 			if (forced_refresh_mode_on[ch][rk]) {
 				for (int coreid = 0; coreid < NUMCORES; coreid++) {
 					if (requests_per_rank[coreid * MAX_NUM_CHANNELS * MAX_NUM_RANKS + ch * MAX_NUM_RANKS + rk] > 0) {
