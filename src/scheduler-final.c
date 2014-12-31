@@ -7,6 +7,15 @@
 #define HI_WM 40
 #define LO_WM 32
 #define MIN_WRITES_ONCE_WRITING_HAS_BEGUN 1
+#define MAX_DISTANCE 13
+#define M2C_INTERVAL 970
+#define C2C_INTERVAL 220
+
+typedef struct state {
+	int marked;
+	int incoming; 
+} State; 
+
 extern long long int CYCLE_VAL;
 extern int NUMCORES;
 int drain_writes[MAX_NUM_CHANNELS];
@@ -21,6 +30,12 @@ int *traffic_light;
 int *requests_per_channel;
 int *requests_per_rank;
 
+// Thread phase prediction
+int *distance;
+int *interval;
+int *phase;
+extern long long int * committed; 
+
 // Cleaning the loading
 void init_all_banks(){
 	int bank_count = NUMCORES * MAX_NUM_CHANNELS * MAX_NUM_RANKS * MAX_NUM_BANKS;
@@ -28,6 +43,13 @@ void init_all_banks(){
 		load_bank[index] = 0;
 }
 
+void init_distance_interval() {
+	for (int i = 0; i < NUMCORES; i++) {
+		distance[i] = 0;
+		interval[i] = 0;
+		phase[i] = 0;
+	}
+}
 
 void init_scheduler_vars()
 {
@@ -37,9 +59,13 @@ void init_scheduler_vars()
 	load_max = (int*)malloc( NUMCORES * sizeof(int));
 	load_all = (int*)malloc( NUMCORES * sizeof(int));
 	traffic_light = (int*)malloc( NUMCORES * sizeof(int));
+	distance = (int*)malloc( NUMCORES * sizeof(int));
+	interval = (int*)malloc( NUMCORES * sizeof(int));
+	phase = (int*)malloc( NUMCORES * sizeof(int));
 	requests_per_channel = (int*)malloc( NUMCORES * MAX_NUM_CHANNELS * sizeof(int));
 	requests_per_rank = (int*)malloc( NUMCORES * MAX_NUM_CHANNELS * MAX_NUM_BANKS * sizeof(int));
 	init_all_banks();
+	init_distance_interval();
 	marked_num = 0;
 	return;
 }
@@ -53,22 +79,35 @@ void init_scheduler_vars()
 // and if REQ_B = NULL then return REQ_A
 int higher(request_t *req_a, request_t *req_b){
 	if( req_b == NULL ) return 1;                                                       // req_b = NULL -> always return req_a
-	if ((req_a->user_ptr) && !(req_b->user_ptr)) return 1;                              // if req_a marked and req_b didn't then return req_a
+	State * s_a = (State*)(req_a->user_ptr);
+	State * s_b = (State*)(req_b->user_ptr);
+	if (((s_a->marked)) && !(s_b->marked)) return 1;                              // if req_a marked and req_b didn't then return req_a
 	int req_a_hit = req_a->command_issuable && (req_a->next_command == COL_READ_CMD), 
 		req_b_hit = req_b->command_issuable && (req_b->next_command == COL_READ_CMD);   // row hit status
 	int req_a_core  = req_a->thread_id, 
 		req_b_core  = req_b->thread_id;                                                 // core of each req
-	int light_a  = traffic_light[req_a->thread_id], 
-		light_b  = traffic_light[req_b->thread_id];                                                 // light of each req
-	if (!(req_a->user_ptr)){
-		if (req_b->user_ptr) return 0;                                              
+	int light_a  = traffic_light[req_a_core], 
+		light_b  = traffic_light[req_b_core];                                                 // light of each req
+	if (!(s_a->marked)){
+		if (s_b->marked) return 0;                                              
 		else 
 			if (req_b_hit)      return 0;                                               // hit   
 			else if (req_a_hit) return 1;
-			else                return 0;
+			else                {
+				if (phase[req_a_core] && !phase[req_b_core]) return 1;
+				if (!phase[req_a_core] && phase[req_b_core]) return 0;
+				if (!light_a && light_b) return 1;
+				if (light_a && !light_b) return 0;
+				if (load_max[req_a_core] < load_max[req_b_core]) return 1;                          // all and max load ranking
+				else if (load_max[req_a_core] > load_max[req_b_core]) return 0;
+				else if (load_all[req_a_core] < load_all[req_b_core]) return 1;
+				return 0;
+			};
 	}
 	if (req_a_hit && !req_b_hit) return 1;
 	if (!req_a_hit && req_b_hit) return 0;
+	if (phase[req_a_core] && !phase[req_b_core]) return 1;
+	if (!phase[req_a_core] && phase[req_b_core]) return 0;
 	if (!light_a && light_b) return 1;
 	if (light_a && !light_b) return 0;
 	if (load_max[req_a_core] < load_max[req_b_core]) return 1;                          // all and max load ranking
@@ -77,10 +116,71 @@ int higher(request_t *req_a, request_t *req_b){
 	return 0;
 }
 
+void stateAssign(int channel) {
+	request_t * rd_ptr = NULL;
+	request_t * wr_ptr = NULL;
+	LL_FOREACH(write_queue_head[channel], wr_ptr)
+	{
+		if (wr_ptr->user_ptr == NULL) {
+			State * st = (State*) malloc (sizeof(State));
+			st->marked = 0;
+			st->incoming = 1;
+			wr_ptr->user_ptr = st;
+		}
+	}
+	LL_FOREACH(read_queue_head[channel], rd_ptr)
+	{
+		if (rd_ptr->user_ptr == NULL) {
+			State * st = (State*) malloc (sizeof(State));
+			st->marked = 0;
+			st->incoming = 1;
+			rd_ptr->user_ptr = st;
+		}
+	}
+}
+
+void predictThreadPhase(int channel) {
+	request_t * req_ptr = NULL;
+	LL_FOREACH(read_queue_head[channel],req_ptr) {
+		// commit count is used by the incoming request only.
+		State * st = (State*)(req_ptr->user_ptr);
+		if(st->incoming) {
+			int thread_id = req_ptr->thread_id;
+
+			if(phase[thread_id] == 1) {
+				if(committed[thread_id] > interval[thread_id]) {
+					distance[thread_id] = 0;
+					interval[thread_id] = committed[thread_id] + C2C_INTERVAL;
+					phase[thread_id] = 1;
+				} else {
+					distance[thread_id] += 1;
+					if(distance[thread_id] > MAX_DISTANCE){
+						phase[thread_id] = 0;
+					}
+				}
+			} else {
+				if(committed[thread_id] > interval[thread_id]) {
+					interval[thread_id] = 0;
+					interval[thread_id] = committed[thread_id] + M2C_INTERVAL;
+					phase[thread_id] = 1;
+				} else {
+					distance[thread_id] += 1;
+					if(distance[thread_id] > MAX_DISTANCE){
+						phase[thread_id] = 0;
+					}
+				}
+			}
+			st->incoming = 0;
+		}
+	}
+
+}
 
 void schedule(int channel)
 {
 
+	stateAssign(channel);
+	predictThreadPhase(channel);
 	request_t * rd_ptr = NULL;
 	request_t * wr_ptr = NULL;
 	request_t * auto_ptr = NULL;
@@ -141,7 +241,8 @@ void schedule(int channel)
 			LL_FOREACH(read_queue_head[channel], rd_ptr)
 			{
 				// if COL_WRITE_CMD is the next command, then that means the appropriate row must already be open && batch first
-				if(rd_ptr->command_issuable && (rd_ptr->next_command == COL_READ_CMD) && rd_ptr->user_ptr )
+				State * st = (State*)(rd_ptr->user_ptr);
+				if(rd_ptr->command_issuable && (rd_ptr->next_command == COL_READ_CMD) && st->marked )
 				{
 					issue_request_command(rd_ptr);
 					read_issued = 1;
@@ -183,7 +284,7 @@ void schedule(int channel)
 			wr_ptr = rd_ptr;
 		}
 
-		if (cas_issued_current_cycle[channel][wr_ptr->dram_addr.rank][wr_ptr->dram_addr.bank]) {
+		if (is_autoprecharge_allowed(channel, wr_ptr->dram_addr.rank, wr_ptr->dram_addr.bank)) {
 			//if (!write_issued && read_issued) {
 			//	wr_ptr = rd_ptr;
 			//}
@@ -223,8 +324,16 @@ void schedule(int channel)
 				if ( load_bank[index] < MARKINGCAP ){                   // Mark the Req if load <  MARKINGCAP (Rule 1)
 					load_bank[index]++;
 					marked_num++;
-					rd_ptr->user_ptr = ((int*)malloc(sizeof(int)));
-					*((int*)rd_ptr->user_ptr) = 1;
+					State * st = (State*)(rd_ptr->user_ptr);
+					if (st == NULL) { 
+						// Batch is cross channel, but state initial is per-channel
+						// st maybe NULL
+						st = (State*) malloc (sizeof(State));
+						st->marked = 0;
+						st->incoming = 1;
+						rd_ptr->user_ptr = st;
+					}
+					st->marked = 1;
 				}
 			}
 		}
@@ -287,7 +396,7 @@ void schedule(int channel)
 			}
 		}
 	}
-	
+
 
 
 	request_t *issue = NULL;
@@ -299,7 +408,8 @@ void schedule(int channel)
 	if(issue){                                                          // Start issue
 		issue_request_command(issue);
 		read_issued = 1;
-		if ((issue->user_ptr) && issue->next_command == COL_READ_CMD)
+		State * st = (State*)(issue->user_ptr);
+		if ((st->marked) && issue->next_command == COL_READ_CMD)
 			marked_num--;
 	}
 	rd_ptr = issue;
@@ -313,7 +423,7 @@ void schedule(int channel)
 	}
 
 
-	if (cas_issued_current_cycle[channel][rd_ptr->dram_addr.rank][rd_ptr->dram_addr.bank]) {
+	if (is_autoprecharge_allowed(channel, rd_ptr->dram_addr.rank, rd_ptr->dram_addr.bank)) {
 		//if (!read_issued && write_issued) {
 		//	rd_ptr = wr_ptr;
 		//}
