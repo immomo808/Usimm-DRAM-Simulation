@@ -4,8 +4,8 @@
 #include "utils.h"
 #include "memory_controller.h"
 #define MARKINGCAP 5
-#define HI_WM 40
-#define LO_WM 32
+#define HI_WM (WQ_CAPACITY - NUM_BANKS)
+#define LO_WM (HI_WM - 8)
 #define MIN_WRITES_ONCE_WRITING_HAS_BEGUN 1
 #define MAX_DISTANCE 13
 #define M2C_INTERVAL 970
@@ -17,6 +17,8 @@ typedef struct state {
 	int incoming; 
 } State; 
 
+extern int WQ_CAPACITY;
+extern int NUM_BANKS;
 extern long long int CYCLE_VAL;
 extern int NUMCORES;
 int drain_writes[MAX_NUM_CHANNELS];
