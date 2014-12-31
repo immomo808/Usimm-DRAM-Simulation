@@ -40,7 +40,9 @@ int *interval;
 int *phase;
 extern long long int * committed; 
 
+// row buffer locality between thread
 int *localityCounter;
+
 // Cleaning the loading
 void init_all_banks(){
 	int bank_count = NUMCORES * MAX_NUM_CHANNELS * MAX_NUM_RANKS * MAX_NUM_BANKS;
@@ -71,6 +73,7 @@ void init_scheduler_vars()
 	requests_per_channel = (int*)malloc( NUMCORES * MAX_NUM_CHANNELS * sizeof(int));
 	requests_per_rank = (int*)malloc( NUMCORES * MAX_NUM_CHANNELS * MAX_NUM_BANKS * sizeof(int));
 #endif
+	localityCounter = (int*)malloc( MAX_NUM_RANKS * MAX_NUM_BANKS * MAX_ROWS * sizeof(int));
 	init_all_banks();
 	init_distance_interval();
 	marked_num = 0;
@@ -97,12 +100,18 @@ int higher(request_t *req_a, request_t *req_b){
 	int light_a  = traffic_light[req_a_core], 
 		light_b  = traffic_light[req_b_core];                                                 // light of each req
 #endif
+	dram_address_t * dram_addr = &(req_a->dram_addr);
+	int locality_a = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row]++;
+	dram_addr = &(req_b->dram_addr);
+	int locality_b = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row]++;
 	if (!(s_a->marked)){
 		if (s_b->marked) return 0;                                              
 		else 
 			if (req_b_hit)      return 0;                                               // hit   
 			else if (req_a_hit) return 1;
 			else                {
+				if (locality_a > locality_b) return 1;
+				if (locality_b > locality_a) return 0;
 				if (phase[req_a_core] && !phase[req_b_core]) return 1;
 				if (!phase[req_a_core] && phase[req_b_core]) return 0;
 #if TRAFFIC_LIGHT 
@@ -117,6 +126,8 @@ int higher(request_t *req_a, request_t *req_b){
 	}
 	if (req_a_hit && !req_b_hit) return 1;
 	if (!req_a_hit && req_b_hit) return 0;
+	if (locality_a > locality_b) return 1;
+	if (locality_b > locality_a) return 0;
 	if (phase[req_a_core] && !phase[req_b_core]) return 1;
 	if (!phase[req_a_core] && phase[req_b_core]) return 0;
 #if TRAFFIC_LIGHT 
@@ -149,6 +160,25 @@ void stateAssign(int channel) {
 			st->incoming = 1;
 			rd_ptr->user_ptr = st;
 		}
+	}
+}
+
+void updateLocality(int channel) {
+	// reset localityCounter
+	for (int i = 0; i < MAX_NUM_RANKS * MAX_NUM_BANKS * MAX_ROWS; i++) {
+		localityCounter[i] = 0;
+	}
+	request_t * rd_ptr = NULL;
+	request_t * wr_ptr = NULL;
+	LL_FOREACH(write_queue_head[channel], wr_ptr)
+	{
+		dram_address_t * dram_addr = &(wr_ptr->dram_addr);
+		localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row]++;
+	}
+	LL_FOREACH(read_queue_head[channel], rd_ptr)
+	{
+		dram_address_t * dram_addr = &(rd_ptr->dram_addr);
+		localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row]++;
 	}
 }
 
@@ -194,6 +224,7 @@ void schedule(int channel)
 
 	stateAssign(channel);
 	predictThreadPhase(channel);
+	updateLocality(channel);
 	request_t * rd_ptr = NULL;
 	request_t * wr_ptr = NULL;
 	request_t * auto_ptr = NULL;
