@@ -10,7 +10,8 @@
 #define MAX_DISTANCE 13
 #define M2C_INTERVAL 970
 #define C2C_INTERVAL 220
-
+#define TRAFFIC_LIGHT 0
+#define MAX_ROWS 32768
 typedef struct state {
 	int marked;
 	int incoming; 
@@ -23,12 +24,15 @@ int writes_done_this_drain[MAX_NUM_CHANNELS];
 int draining_writes_due_to_rq_empty[MAX_NUM_CHANNELS];
 
 
+
 int *load_bank, *load_max, *load_all, marked_num;
 
+#if TRAFFIC_LIGHT 
 // Traffic light
 int *traffic_light;
 int *requests_per_channel;
 int *requests_per_rank;
+#endif
 
 // Thread phase prediction
 int *distance;
@@ -36,6 +40,7 @@ int *interval;
 int *phase;
 extern long long int * committed; 
 
+int *localityCounter;
 // Cleaning the loading
 void init_all_banks(){
 	int bank_count = NUMCORES * MAX_NUM_CHANNELS * MAX_NUM_RANKS * MAX_NUM_BANKS;
@@ -58,12 +63,14 @@ void init_scheduler_vars()
 	load_bank = (int*)malloc( bank_count * sizeof(int) ); 
 	load_max = (int*)malloc( NUMCORES * sizeof(int));
 	load_all = (int*)malloc( NUMCORES * sizeof(int));
-	traffic_light = (int*)malloc( NUMCORES * sizeof(int));
 	distance = (int*)malloc( NUMCORES * sizeof(int));
 	interval = (int*)malloc( NUMCORES * sizeof(int));
 	phase = (int*)malloc( NUMCORES * sizeof(int));
+#if TRAFFIC_LIGHT 
+	traffic_light = (int*)malloc( NUMCORES * sizeof(int));
 	requests_per_channel = (int*)malloc( NUMCORES * MAX_NUM_CHANNELS * sizeof(int));
 	requests_per_rank = (int*)malloc( NUMCORES * MAX_NUM_CHANNELS * MAX_NUM_BANKS * sizeof(int));
+#endif
 	init_all_banks();
 	init_distance_interval();
 	marked_num = 0;
@@ -86,8 +93,10 @@ int higher(request_t *req_a, request_t *req_b){
 		req_b_hit = req_b->command_issuable && (req_b->next_command == COL_READ_CMD);   // row hit status
 	int req_a_core  = req_a->thread_id, 
 		req_b_core  = req_b->thread_id;                                                 // core of each req
+#if TRAFFIC_LIGHT 
 	int light_a  = traffic_light[req_a_core], 
 		light_b  = traffic_light[req_b_core];                                                 // light of each req
+#endif
 	if (!(s_a->marked)){
 		if (s_b->marked) return 0;                                              
 		else 
@@ -96,8 +105,10 @@ int higher(request_t *req_a, request_t *req_b){
 			else                {
 				if (phase[req_a_core] && !phase[req_b_core]) return 1;
 				if (!phase[req_a_core] && phase[req_b_core]) return 0;
+#if TRAFFIC_LIGHT 
 				if (!light_a && light_b) return 1;
 				if (light_a && !light_b) return 0;
+#endif
 				if (load_max[req_a_core] < load_max[req_b_core]) return 1;                          // all and max load ranking
 				else if (load_max[req_a_core] > load_max[req_b_core]) return 0;
 				else if (load_all[req_a_core] < load_all[req_b_core]) return 1;
@@ -108,8 +119,10 @@ int higher(request_t *req_a, request_t *req_b){
 	if (!req_a_hit && req_b_hit) return 0;
 	if (phase[req_a_core] && !phase[req_b_core]) return 1;
 	if (!phase[req_a_core] && phase[req_b_core]) return 0;
+#if TRAFFIC_LIGHT 
 	if (!light_a && light_b) return 1;
 	if (light_a && !light_b) return 0;
+#endif
 	if (load_max[req_a_core] < load_max[req_b_core]) return 1;                          // all and max load ranking
 	else if (load_max[req_a_core] > load_max[req_b_core]) return 0;
 	else if (load_all[req_a_core] < load_all[req_b_core]) return 1;
@@ -236,33 +249,22 @@ void schedule(int channel)
 				break;
 			}
 		}
+		request_t * issue = NULL;
 		if(!write_issued){
 			// if no write row hit, check read queue
 			LL_FOREACH(read_queue_head[channel], rd_ptr)
 			{
 				// if COL_WRITE_CMD is the next command, then that means the appropriate row must already be open && batch first
-				State * st = (State*)(rd_ptr->user_ptr);
-				if(rd_ptr->command_issuable && (rd_ptr->next_command == COL_READ_CMD) && st->marked )
+				if(rd_ptr->command_issuable && (rd_ptr->next_command == COL_READ_CMD))
 				{
-					issue_request_command(rd_ptr);
-					read_issued = 1;
-					break;
+					if (higher(rd_ptr, issue)) {
+						issue = rd_ptr;
+						read_issued = 1;
+					}
 				}
 			}
 		}
 
-		if(!write_issued && !read_issued){
-			LL_FOREACH(read_queue_head[channel], rd_ptr)
-			{
-				// if COL_WRITE_CMD is the next command, then that means the appropriate row must already be open
-				if(rd_ptr->command_issuable && (rd_ptr->next_command == COL_READ_CMD))
-				{
-					issue_request_command(rd_ptr);
-					read_issued = 1;
-					break;
-				}
-			}
-		}
 		if(!write_issued && !read_issued){
 			// if no open rows, just issue any other available commands
 			LL_FOREACH(write_queue_head[channel], wr_ptr)
@@ -275,6 +277,29 @@ void schedule(int channel)
 				}
 			}
 		}
+
+		if (!write_issued && !read_issued) {
+			LL_FOREACH(read_queue_head[channel], rd_ptr)
+			{
+				// Random one
+				if(rd_ptr->command_issuable)
+				{
+					if (higher(rd_ptr, issue)) {
+						issue = rd_ptr;
+						read_issued = 1;
+					}
+				}
+			}
+		}
+
+		if(issue){                                                          // Start issue
+			issue_request_command(issue);
+			read_issued = 1;
+			State * st = (State*)(issue->user_ptr);
+			if ((st->marked) && issue->next_command == COL_READ_CMD)
+				marked_num--;
+		}
+		rd_ptr = issue;
 		// try auto-precharge
 		if (!write_issued && !read_issued) {
 			return; // no request issued, quit
@@ -353,6 +378,7 @@ void schedule(int channel)
 		}
 	}
 
+#if TRAFFIC_LIGHT 
 	// TODO: Traffic light
 	// Iterate through all the ranks and channels to know the request number of each thread toward ranks and channels
 	// Reset first
@@ -396,13 +422,13 @@ void schedule(int channel)
 			}
 		}
 	}
-
+#endif
 
 
 	request_t *issue = NULL;
-	LL_FOREACH(read_queue_head[channel],rd_ptr) {                       // Start batch
+	LL_FOREACH(read_queue_head[channel], rd_ptr) {                       // Start batch
 		if(rd_ptr->command_issuable)
-			if(higher(rd_ptr,issue))
+			if(higher(rd_ptr, issue))
 				issue = rd_ptr;
 	}
 	if(issue){                                                          // Start issue
@@ -411,6 +437,18 @@ void schedule(int channel)
 		State * st = (State*)(issue->user_ptr);
 		if ((st->marked) && issue->next_command == COL_READ_CMD)
 			marked_num--;
+	}
+	else {
+		// No read can issue, issue a random write
+		LL_FOREACH(write_queue_head[channel], wr_ptr)
+		{
+			if(wr_ptr->command_issuable)
+			{
+				issue_request_command(wr_ptr);
+				write_issued = 1;
+				break;
+			}
+		}
 	}
 	rd_ptr = issue;
 	// try auto-precharge
