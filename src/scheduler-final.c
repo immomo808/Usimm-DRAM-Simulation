@@ -3,7 +3,7 @@
 #include "utlist.h"
 #include "utils.h"
 #include "memory_controller.h"
-#define MARKINGCAP 5
+#define MARKINGCAP 100
 #define HI_WM (WQ_CAPACITY - NUM_BANKS)
 #define LO_WM (HI_WM - 8)
 #define MIN_WRITES_ONCE_WRITING_HAS_BEGUN 1
@@ -75,7 +75,7 @@ void init_scheduler_vars()
 	requests_per_channel = (int*)malloc( NUMCORES * MAX_NUM_CHANNELS * sizeof(int));
 	requests_per_rank = (int*)malloc( NUMCORES * MAX_NUM_CHANNELS * MAX_NUM_BANKS * sizeof(int));
 #endif
-	localityCounter = (int*)malloc( MAX_NUM_RANKS * MAX_NUM_BANKS * MAX_ROWS * sizeof(int));
+	//	localityCounter = (int*)malloc( MAX_NUM_RANKS * MAX_NUM_BANKS * MAX_ROWS * sizeof(int));
 	init_all_banks();
 	init_distance_interval();
 	marked_num = 0;
@@ -102,18 +102,18 @@ int higher(request_t *req_a, request_t *req_b){
 	int light_a  = traffic_light[req_a_core], 
 		light_b  = traffic_light[req_b_core];                                                 // light of each req
 #endif
-	dram_address_t * dram_addr = &(req_a->dram_addr);
-	int locality_a = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row];
-	dram_addr = &(req_b->dram_addr);
-	int locality_b = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row];
+	//	dram_address_t * dram_addr = &(req_a->dram_addr);
+	//	int locality_a = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row];
+	//	dram_addr = &(req_b->dram_addr);
+	//	int locality_b = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row];
 	if (!(s_a->marked)){
 		if (s_b->marked) return 0;                                              
 		else 
 			if (req_b_hit)      return 0;                                               // hit   
 			else if (req_a_hit) return 1;
 			else                {
-				if (locality_a > locality_b) return 1;
-				if (locality_b > locality_a) return 0;
+				//				if (locality_a > locality_b) return 1;
+				//				if (locality_b > locality_a) return 0;
 				if (phase[req_a_core] && !phase[req_b_core]) return 1;
 				if (!phase[req_a_core] && phase[req_b_core]) return 0;
 #if TRAFFIC_LIGHT 
@@ -128,8 +128,8 @@ int higher(request_t *req_a, request_t *req_b){
 	}
 	if (req_a_hit && !req_b_hit) return 1;
 	if (!req_a_hit && req_b_hit) return 0;
-	if (locality_a > locality_b) return 1;
-	if (locality_b > locality_a) return 0;
+	//	if (locality_a > locality_b) return 1;
+	//	if (locality_b > locality_a) return 0;
 	if (phase[req_a_core] && !phase[req_b_core]) return 1;
 	if (!phase[req_a_core] && phase[req_b_core]) return 0;
 #if TRAFFIC_LIGHT 
@@ -168,9 +168,9 @@ void stateAssign(int channel) {
 void updateLocality(int channel) {
 	// reset localityCounter
 	/*
-	for (int i = 0; i < MAX_NUM_RANKS * MAX_NUM_BANKS * MAX_ROWS; i++) {
-		localityCounter[i] = 0;
-	}*/
+	   for (int i = 0; i < MAX_NUM_RANKS * MAX_NUM_BANKS * MAX_ROWS; i++) {
+	   localityCounter[i] = 0;
+	   }*/
 	// use reverse reset
 	request_t * rd_ptr = NULL;
 	request_t * wr_ptr = NULL;
@@ -238,7 +238,7 @@ void schedule(int channel)
 
 	stateAssign(channel);
 	predictThreadPhase(channel);
-	updateLocality(channel);
+	//	updateLocality(channel);
 	request_t * rd_ptr = NULL;
 	request_t * wr_ptr = NULL;
 	request_t * auto_ptr = NULL;
@@ -484,14 +484,29 @@ void schedule(int channel)
 			marked_num--;
 	}
 	else {
-		// No read can issue, issue a random write
+		// prioritize open row hits
 		LL_FOREACH(write_queue_head[channel], wr_ptr)
 		{
-			if(wr_ptr->command_issuable)
+			// if COL_WRITE_CMD is the next command, then that means the appropriate row must already be open
+			if(wr_ptr->command_issuable && (wr_ptr->next_command == COL_WRITE_CMD))
 			{
+				//writes_done_this_drain[channel]++;
 				issue_request_command(wr_ptr);
 				write_issued = 1;
 				break;
+			}
+		}
+
+		if (!write_issued) {
+			// No read can issue, issue a random write
+			LL_FOREACH(write_queue_head[channel], wr_ptr)
+			{
+				if(wr_ptr->command_issuable)
+				{
+					issue_request_command(wr_ptr);
+					write_issued = 1;
+					break;
+				}
 			}
 		}
 	}
