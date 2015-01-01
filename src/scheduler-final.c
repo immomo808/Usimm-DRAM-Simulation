@@ -103,9 +103,9 @@ int higher(request_t *req_a, request_t *req_b){
 		light_b  = traffic_light[req_b_core];                                                 // light of each req
 #endif
 	dram_address_t * dram_addr = &(req_a->dram_addr);
-	int locality_a = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row]++;
+	int locality_a = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row];
 	dram_addr = &(req_b->dram_addr);
-	int locality_b = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row]++;
+	int locality_b = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row];
 	if (!(s_a->marked)){
 		if (s_b->marked) return 0;                                              
 		else 
@@ -167,11 +167,23 @@ void stateAssign(int channel) {
 
 void updateLocality(int channel) {
 	// reset localityCounter
+	/*
 	for (int i = 0; i < MAX_NUM_RANKS * MAX_NUM_BANKS * MAX_ROWS; i++) {
 		localityCounter[i] = 0;
-	}
+	}*/
+	// use reverse reset
 	request_t * rd_ptr = NULL;
 	request_t * wr_ptr = NULL;
+	LL_FOREACH(write_queue_head[channel], wr_ptr)
+	{
+		dram_address_t * dram_addr = &(wr_ptr->dram_addr);
+		localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row] = 0;
+	}
+	LL_FOREACH(read_queue_head[channel], rd_ptr)
+	{
+		dram_address_t * dram_addr = &(rd_ptr->dram_addr);
+		localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row] = 0;
+	}
 	LL_FOREACH(write_queue_head[channel], wr_ptr)
 	{
 		dram_address_t * dram_addr = &(wr_ptr->dram_addr);
