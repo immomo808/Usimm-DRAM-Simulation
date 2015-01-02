@@ -10,8 +10,11 @@
 #define MAX_DISTANCE 13
 #define M2C_INTERVAL 970
 #define C2C_INTERVAL 220
-#define TRAFFIC_LIGHT 0
 #define MAX_ROWS 32768
+#define TRAFFIC_LIGHT 0
+#define PAR_BS 0
+#define AG_P 0
+#define LOCALITY 0
 typedef struct state {
 	int marked;
 	int incoming; 
@@ -78,7 +81,7 @@ void init_scheduler_vars()
 	requests_per_channel = (int*)malloc( NUMCORES * MAX_NUM_CHANNELS * sizeof(int));
 	requests_per_rank = (int*)malloc( NUMCORES * MAX_NUM_CHANNELS * MAX_NUM_BANKS * sizeof(int));
 #endif
-	//	localityCounter = (int*)malloc( MAX_NUM_RANKS * MAX_NUM_BANKS * MAX_ROWS * sizeof(int));
+	localityCounter = (int*)malloc( MAX_NUM_RANKS * MAX_NUM_BANKS * MAX_ROWS * sizeof(int));
 	init_all_banks();
 	init_distance_interval();
 	marked_num = 0;
@@ -135,9 +138,11 @@ void aggressivePrecharge(int channel) {
 // and if REQ_B = NULL then return REQ_A
 int higher(request_t *req_a, request_t *req_b){
 	if( req_b == NULL ) return 1;                                                       // req_b = NULL -> always return req_a
+#if PAR_BS
 	State * s_a = (State*)(req_a->user_ptr);
 	State * s_b = (State*)(req_b->user_ptr);
 	if (((s_a->marked)) && !(s_b->marked)) return 1;                              // if req_a marked and req_b didn't then return req_a
+#endif	
 	int req_a_hit = req_a->command_issuable && (req_a->next_command == COL_READ_CMD), 
 		req_b_hit = req_b->command_issuable && (req_b->next_command == COL_READ_CMD);   // row hit status
 	int req_a_core  = req_a->thread_id, 
@@ -146,20 +151,25 @@ int higher(request_t *req_a, request_t *req_b){
 	int light_a  = traffic_light[req_a_core], 
 		light_b  = traffic_light[req_b_core];                                                 // light of each req
 #endif
-	//	dram_address_t * dram_addr = &(req_a->dram_addr);
-	//	int locality_a = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row];
-	//	dram_addr = &(req_b->dram_addr);
-	//	int locality_b = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row];
+#if LOCALITY
+	dram_address_t * dram_addr = &(req_a->dram_addr);
+	int locality_a = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row];
+	dram_addr = &(req_b->dram_addr);
+	int locality_b = localityCounter[dram_addr->rank * MAX_NUM_BANKS * MAX_ROWS + dram_addr->bank * MAX_ROWS + dram_addr->row];
+#endif
+#if PAR_BS
 	if (!(s_a->marked)){
 		if (s_b->marked) return 0;                                              
 		else 
 			if (req_b_hit)      return 0;                                               // hit   
 			else if (req_a_hit) return 1;
 			else                {
-				//				if (locality_a > locality_b) return 1;
-				//				if (locality_b > locality_a) return 0;
 				if (phase[req_a_core] && !phase[req_b_core]) return 1;
 				if (!phase[req_a_core] && phase[req_b_core]) return 0;
+#if LOCALITY
+				if (locality_a > locality_b) return 1;
+				if (locality_b > locality_a) return 0;
+#endif
 #if TRAFFIC_LIGHT 
 				if (!light_a && light_b) return 1;
 				if (light_a && !light_b) return 0;
@@ -170,19 +180,24 @@ int higher(request_t *req_a, request_t *req_b){
 				return 0;
 			};
 	}
+#endif
 	if (req_a_hit && !req_b_hit) return 1;
 	if (!req_a_hit && req_b_hit) return 0;
-	//	if (locality_a > locality_b) return 1;
-	//	if (locality_b > locality_a) return 0;
 	if (phase[req_a_core] && !phase[req_b_core]) return 1;
 	if (!phase[req_a_core] && phase[req_b_core]) return 0;
+#if LOCALITY
+	if (locality_a > locality_b) return 1;
+	if (locality_b > locality_a) return 0;
+#endif
 #if TRAFFIC_LIGHT 
 	if (!light_a && light_b) return 1;
 	if (light_a && !light_b) return 0;
 #endif
+#if PAR_BS
 	if (load_max[req_a_core] < load_max[req_b_core]) return 1;                          // all and max load ranking
 	else if (load_max[req_a_core] > load_max[req_b_core]) return 0;
 	else if (load_all[req_a_core] < load_all[req_b_core]) return 1;
+#endif
 	return 0;
 }
 
@@ -282,7 +297,9 @@ void schedule(int channel)
 
 	stateAssign(channel);
 	predictThreadPhase(channel);
-	//	updateLocality(channel);
+#if LOCALITY
+	updateLocality(channel);
+#endif
 	request_t * rd_ptr = NULL;
 	request_t * wr_ptr = NULL;
 	request_t * auto_ptr = NULL;
@@ -333,7 +350,9 @@ void schedule(int channel)
 			if(wr_ptr->command_issuable && (wr_ptr->next_command == COL_WRITE_CMD))
 			{
 				writes_done_this_drain[channel]++;
+#if AG_P
 				updateAggressiveTable(channel, wr_ptr);
+#endif
 				issue_request_command(wr_ptr);
 				write_issued = 1;
 				break;
@@ -361,7 +380,9 @@ void schedule(int channel)
 			{
 				if(wr_ptr->command_issuable)
 				{
+#if AG_P
 					updateAggressiveTable(channel, wr_ptr);
+#endif
 					issue_request_command(wr_ptr);
 					write_issued = 1;
 					break;
@@ -384,17 +405,23 @@ void schedule(int channel)
 		}
 
 		if(issue){                                                          // Start issue
+#if AG_P
 			updateAggressiveTable(channel, issue);
+#endif
 			issue_request_command(issue);
 			read_issued = 1;
+#if PAR_BS
 			State * st = (State*)(issue->user_ptr);
 			if ((st->marked) && issue->next_command == COL_READ_CMD)
 				marked_num--;
+#endif
 		}
 		rd_ptr = issue;
 		// try auto-precharge
 		if (!write_issued && !read_issued) {
+#if AG_P
 			aggressivePrecharge(channel);
+#endif
 			return; // no request issued, quit
 		}
 
@@ -430,6 +457,7 @@ void schedule(int channel)
 	}
 	// do a read
 	// Start PAR-BS
+#if PAR_BS
 	if( marked_num == 0 ){          // if last batch finish
 		init_all_banks();
 		for(int ch = 0; ch < MAX_NUM_CHANNELS; ch++){
@@ -470,7 +498,7 @@ void schedule(int channel)
 			all_load = 0;
 		}
 	}
-
+#endif
 #if TRAFFIC_LIGHT 
 	// TODO: Traffic light
 	// Iterate through all the ranks and channels to know the request number of each thread toward ranks and channels
@@ -524,13 +552,17 @@ void schedule(int channel)
 			if(higher(rd_ptr, issue))
 				issue = rd_ptr;
 	}
-	if(issue){                                                          // Start issue
+	if(issue){  		// Start issue
+#if AG_P
 		updateAggressiveTable(channel, issue);
+#endif
 		issue_request_command(issue);
 		read_issued = 1;
+#if PAR_BS
 		State * st = (State*)(issue->user_ptr);
 		if ((st->marked) && issue->next_command == COL_READ_CMD)
 			marked_num--;
+#endif
 	}
 	else {
 		// prioritize open row hits
@@ -540,7 +572,9 @@ void schedule(int channel)
 			if(wr_ptr->command_issuable && (wr_ptr->next_command == COL_WRITE_CMD))
 			{
 				//writes_done_this_drain[channel]++;
+#if AG_P
 				updateAggressiveTable(channel, wr_ptr);
+#endif
 				issue_request_command(wr_ptr);
 				write_issued = 1;
 				break;
@@ -553,7 +587,9 @@ void schedule(int channel)
 			{
 				if(wr_ptr->command_issuable)
 				{
+#if AG_P
 					updateAggressiveTable(channel, wr_ptr);
+#endif
 					issue_request_command(wr_ptr);
 					write_issued = 1;
 					break;
@@ -564,7 +600,9 @@ void schedule(int channel)
 	rd_ptr = issue;
 	// try auto-precharge
 	if (!write_issued && !read_issued) {
+#if AG_P
 		aggressivePrecharge (channel);	
+#endif
 		return; // no request issued, quit
 	}
 
