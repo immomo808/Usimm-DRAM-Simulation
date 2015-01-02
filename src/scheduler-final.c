@@ -19,6 +19,7 @@ typedef struct state {
 
 extern int WQ_CAPACITY;
 extern int NUM_BANKS;
+extern int NUM_RANKS;
 extern long long int CYCLE_VAL;
 extern int NUMCORES;
 int drain_writes[MAX_NUM_CHANNELS];
@@ -59,6 +60,8 @@ void init_distance_interval() {
 		phase[i] = 0;
 	}
 }
+/* A data structure to see if a bank is a candidate for precharge. */
+int recent_colacc[MAX_NUM_CHANNELS][MAX_NUM_RANKS][MAX_NUM_BANKS];
 
 void init_scheduler_vars()
 {
@@ -79,9 +82,50 @@ void init_scheduler_vars()
 	init_all_banks();
 	init_distance_interval();
 	marked_num = 0;
+	// Aggressive precharge
+	int i, j, k;
+	for (i=0; i<MAX_NUM_CHANNELS; i++) {
+		for (j=0; j<MAX_NUM_RANKS; j++) {
+			for (k=0; k<MAX_NUM_BANKS; k++) {
+				recent_colacc[i][j][k] = 0;
+			}
+		}
+	}
 	return;
 }
 
+void updateAggressiveTable(int channel, request_t * req) {
+	/* Before issuing the command, see if this bank is now a candidate for closure (if it just did a column-rd/wr).
+	   If the bank just did an activate or precharge, it is not a candidate for closure. */
+	if (req->next_command == COL_READ_CMD) {
+		recent_colacc[channel][req->dram_addr.rank][req->dram_addr.bank] = 1;
+	}
+	if (req->next_command == ACT_CMD) {
+		recent_colacc[channel][req->dram_addr.rank][req->dram_addr.bank] = 0;
+	}
+	if (req->next_command == PRE_CMD) {
+		recent_colacc[channel][req->dram_addr.rank][req->dram_addr.bank] = 0;
+	}
+}
+
+void aggressivePrecharge(int channel) {
+	/* If a command hasn't yet been issued to this channel in this cycle, issue a precharge. */
+	if (!command_issued_current_cycle[channel]) {
+		for (int i=0; i<NUM_RANKS; i++) {
+			for (int j=0; j<NUM_BANKS; j++) {  /* For all banks on the channel.. */
+        		int chit = dram_state[channel][i][j].state == ROW_ACTIVE;
+				if (chit && recent_colacc[channel][i][j]) {  /* See if this bank is a candidate. */
+					if (is_precharge_allowed(channel,i,j)) {  /* See if precharge is doable. */
+						if (issue_precharge_command(channel,i,j)) {
+							//num_aggr_precharge++;
+							recent_colacc[channel][i][j] = 0;
+						}
+					}
+				}
+			}
+		}
+	}
+}
 
 // Compare the Priority in Rule 2
 // 1.Marked
@@ -289,6 +333,7 @@ void schedule(int channel)
 			if(wr_ptr->command_issuable && (wr_ptr->next_command == COL_WRITE_CMD))
 			{
 				writes_done_this_drain[channel]++;
+				updateAggressiveTable(channel, wr_ptr);
 				issue_request_command(wr_ptr);
 				write_issued = 1;
 				break;
@@ -316,6 +361,7 @@ void schedule(int channel)
 			{
 				if(wr_ptr->command_issuable)
 				{
+					updateAggressiveTable(channel, wr_ptr);
 					issue_request_command(wr_ptr);
 					write_issued = 1;
 					break;
@@ -338,6 +384,7 @@ void schedule(int channel)
 		}
 
 		if(issue){                                                          // Start issue
+			updateAggressiveTable(channel, issue);
 			issue_request_command(issue);
 			read_issued = 1;
 			State * st = (State*)(issue->user_ptr);
@@ -347,6 +394,7 @@ void schedule(int channel)
 		rd_ptr = issue;
 		// try auto-precharge
 		if (!write_issued && !read_issued) {
+			aggressivePrecharge(channel);
 			return; // no request issued, quit
 		}
 
@@ -477,6 +525,7 @@ void schedule(int channel)
 				issue = rd_ptr;
 	}
 	if(issue){                                                          // Start issue
+		updateAggressiveTable(channel, issue);
 		issue_request_command(issue);
 		read_issued = 1;
 		State * st = (State*)(issue->user_ptr);
@@ -491,6 +540,7 @@ void schedule(int channel)
 			if(wr_ptr->command_issuable && (wr_ptr->next_command == COL_WRITE_CMD))
 			{
 				//writes_done_this_drain[channel]++;
+				updateAggressiveTable(channel, wr_ptr);
 				issue_request_command(wr_ptr);
 				write_issued = 1;
 				break;
@@ -503,6 +553,7 @@ void schedule(int channel)
 			{
 				if(wr_ptr->command_issuable)
 				{
+					updateAggressiveTable(channel, wr_ptr);
 					issue_request_command(wr_ptr);
 					write_issued = 1;
 					break;
@@ -513,6 +564,7 @@ void schedule(int channel)
 	rd_ptr = issue;
 	// try auto-precharge
 	if (!write_issued && !read_issued) {
+		aggressivePrecharge (channel);	
 		return; // no request issued, quit
 	}
 
