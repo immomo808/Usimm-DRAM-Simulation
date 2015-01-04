@@ -15,21 +15,21 @@ extern int NUM_BANKS;
 // end write queue drain once write queue has this many writes in it
 #define LO_WM (HI_WM - 8)
 #define AUTO_PRECHARGE 1
-#define THREAD_PHASE 1
-#define TRAFFIC_LIGHT 1
-#define LOCALITY 1
+#define THREAD_PHASE 0
+#define TRAFFIC_LIGHT 0
+#define LOCALITY 0
 
 #define MAX_ROWS 32768
 #define MAX_DISTANCE 13
 #define M2C_INTERVAL 970
 #define C2C_INTERVAL 220
 
+extern int NUMCORES;
 #if THREAD_PHASE
 // Thread phase prediction
 int *distance;
 int *interval;
 int *phase;
-extern int NUMCORES;
 extern long long int * committed;
 #endif
 
@@ -53,6 +53,7 @@ typedef struct state {
 	int incoming;
 } State;
 
+#if THREAD_PHASE
 void init_distance_interval() {
 	for (int i = 0; i < NUMCORES; i++) {
 		distance[i] = 0;
@@ -60,6 +61,7 @@ void init_distance_interval() {
 		phase[i] = 0;
 	}
 }
+#endif
 
 void init_scheduler_vars()
 {
